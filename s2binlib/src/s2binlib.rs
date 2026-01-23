@@ -356,15 +356,35 @@ impl<'a> S2BinLib<'a> {
         ))
     }
 
-    fn find_pattern_string_in_section(
+    fn find_all_pattern_string_in_section(
         &self,
         binary_name: &str,
         section_name: &str,
         string: &str,
-    ) -> Result<u64> {
-        let bytes = string.as_bytes().to_vec();
-
-        self.find_pattern_bytes_in_section(binary_name, section_name, &bytes)
+    ) -> Result<Vec<u64>> {
+        let binary_data = self.get_binary(binary_name)?;
+        let (start, end) = self.get_section_range(binary_name, section_name)?;
+        let bytes = string.as_bytes();
+        let mut result = Vec::new();
+        let mut offset = start;
+        loop {
+            if offset >= end {
+                break;
+            }
+            let search = find_pattern_simd(
+                &binary_data[offset as usize..end as usize],
+                bytes,
+                &vec![],
+            );
+            let Ok(mut found) = search else { break };
+            if found == 0 {
+                break;
+            }
+            found += offset;
+            result.push(found);
+            offset = found + 1;
+        }
+        Ok(result)
     }
 
     fn find_pattern_int32_in_section(
@@ -459,127 +479,144 @@ impl<'a> S2BinLib<'a> {
     fn find_vtable_rva_windows(&self, binary_name: &str, vtable_name: &str) -> Result<u64> {
         let binary_data = self.get_binary(binary_name)?;
 
-        let type_descriptor_name =
-            self.find_pattern_string_in_section(binary_name, ".data", &vtable_name)?;
+        let candidates =
+            self.find_all_pattern_string_in_section(binary_name, ".data", vtable_name)?;
+        let mut last_err: Option<anyhow::Error> = None;
+        for type_descriptor_name in candidates {
+            let attempt = (|| {
+                let rtti_type_descriptor = self.file_offset_to_rva(binary_name, type_descriptor_name)?
+                    - 0x10
+                    - self.get_image_base(binary_name)?;
 
-        let rtti_type_descriptor = self.file_offset_to_rva(binary_name, type_descriptor_name)?
-            - 0x10
-            - self.get_image_base(binary_name)?;
+                let rtti_type_descriptor_ptr_pattern = rtti_type_descriptor.to_le_bytes().to_vec();
 
-        let rtti_type_descriptor_ptr_pattern = rtti_type_descriptor.to_le_bytes().to_vec();
+                let (_start, end) = self.get_section_range(binary_name, ".rdata")?;
 
-        let (_start, end) = self.get_section_range(binary_name, ".rdata")?;
-
-        let mut reference =
-            self.find_pattern_int32_in_section(binary_name, ".rdata", rtti_type_descriptor as u32)?;
-        loop {
-            if read_int32(&binary_data, reference - 0xC) == 1
-                && read_int32(&binary_data, reference - 0x8) == 0
-            {
-                let reference_offset = self.file_offset_to_rva(binary_name, reference - 0xC)?;
-                let rtti_complete_object_locator = self.find_pattern_int32_in_section(
+                let mut reference = self.find_pattern_int32_in_section(
                     binary_name,
                     ".rdata",
-                    reference_offset as u32,
+                    rtti_type_descriptor as u32,
                 )?;
-                return Ok(self.file_offset_to_rva(binary_name, rtti_complete_object_locator + 8)?);
+                if reference == 0 {
+                    bail!("Vtable not found.");
+                }
+                loop {
+                    if read_int32(&binary_data, reference - 0xC) == 1
+                        && read_int32(&binary_data, reference - 0x8) == 0
+                    {
+                        let reference_offset =
+                            self.file_offset_to_rva(binary_name, reference - 0xC)?;
+                        let rtti_complete_object_locator = self.find_pattern_int32_in_section(
+                            binary_name,
+                            ".rdata",
+                            reference_offset as u32,
+                        )?;
+                        if rtti_complete_object_locator != 0 {
+                            return Ok(self.file_offset_to_rva(
+                                binary_name,
+                                rtti_complete_object_locator + 8,
+                            )?);
+                        }
+                    }
+                    let last_reference = reference + 1;
+                    let result = find_pattern_simd(
+                        &binary_data[last_reference as usize..end as usize],
+                        &rtti_type_descriptor_ptr_pattern[0..4],
+                        &vec![],
+                    );
+                    let Ok(next) = result else { break };
+                    if next == 0 {
+                        break;
+                    }
+                    reference = next + last_reference as u64;
+                }
+
+                bail!("Vtable not found.")
+            })();
+            match attempt {
+                Ok(r) => return Ok(r),
+                Err(e) => last_err = Some(e),
             }
-            let last_reference = reference + 1;
-            let result = find_pattern_simd(
-                &binary_data[last_reference as usize..end as usize],
-                &rtti_type_descriptor_ptr_pattern[0..4],
-                &vec![],
-            );
-            if let Err(_) = result {
-                break;
-            }
-            reference = result.unwrap() + last_reference as u64;
         }
 
-        Err(anyhow::anyhow!("Vtable not found."))
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Vtable not found.")))
     }
 
     fn find_vtable_rva_linux(&self, binary_name: &str, vtable_name: &str) -> Result<u64> {
         let binary_data = self.get_binary(binary_name)?;
 
-        let data_range = self.get_section_range(binary_name, ".rodata")?;
+        let candidates =
+            self.find_all_pattern_string_in_section(binary_name, ".rodata", vtable_name)?;
+        let mut last_err: Option<anyhow::Error> = None;
 
-        let offset = data_range.0;
+        for type_info_name in candidates {
+            let attempt = (|| {
+                let type_info_name_str = self.read_string(binary_name, type_info_name)?;
+                if type_info_name_str != vtable_name {
+                    bail!("Vtable not found.");
+                }
 
-        let mut type_info_name = find_pattern_simd(
-            &binary_data[offset as usize..],
-            &vtable_name.as_bytes(),
-            &vec![],
-        )?;
-        type_info_name += offset;
-        while type_info_name != 0 {
-            let type_info_name_str = self.read_string(binary_name, type_info_name)?;
+                let type_info_name_rva = self.file_offset_to_rva(binary_name, type_info_name)?;
+                let type_info_name_ptr_pattern = type_info_name_rva.to_le_bytes();
 
-            if type_info_name_str == vtable_name {
-                break;
-            }
-            let last_type_descriptor_name = type_info_name + 1;
-            type_info_name = find_pattern_simd(
-                &binary_data[last_type_descriptor_name as usize..],
-                &vtable_name.as_bytes(),
-                &vec![],
-            )?;
-            type_info_name += last_type_descriptor_name;
-        }
+                let reference_type_name = self.find_pattern_bytes_in_section(
+                    binary_name,
+                    ".data.rel.ro",
+                    &type_info_name_ptr_pattern[0..4],
+                )?;
+                if reference_type_name == 0 {
+                    bail!("Vtable not found.");
+                }
 
-        // Find reference to type name in .data.rel.ro section (8-byte pointer)
-        let type_info_name_rva = self.file_offset_to_rva(binary_name, type_info_name)?;
-        let type_info_name_ptr_pattern = type_info_name_rva.to_le_bytes();
+                let type_info = reference_type_name - 0x8;
+                let type_info_rva = self.file_offset_to_rva(binary_name, type_info)?;
+                let type_info_ptr_pattern = type_info_rva.to_le_bytes();
 
-        let reference_type_name = self.find_pattern_bytes_in_section(
-            binary_name,
-            ".data.rel.ro",
-            &type_info_name_ptr_pattern[0..4],
-        )?;
+                for section_name in &[".data.rel.ro", ".data.rel.ro.local"] {
+                    if let Ok((start, end)) = self.get_section_range(binary_name, section_name) {
+                        let mut search_offset = start;
+                        loop {
+                            let result = find_pattern_simd(
+                                &binary_data[search_offset as usize..end as usize],
+                                &type_info_ptr_pattern,
+                                &vec![],
+                            );
 
-        // Offset back by 0x8 to get typeinfo
-        let type_info = reference_type_name - 0x8;
-        let type_info_rva = self.file_offset_to_rva(binary_name, type_info)?;
-        let type_info_ptr_pattern = type_info_rva.to_le_bytes();
+                            let Ok(mut reference) = result else { break };
+                            if reference == 0 {
+                                break;
+                            }
 
-        // Search for references to typeinfo in .data.rel.ro and .data.rel.ro.local sections
-        for section_name in &[".data.rel.ro", ".data.rel.ro.local"] {
-            if let Ok((start, end)) = self.get_section_range(binary_name, section_name) {
-                let mut search_offset = start;
+                            reference += search_offset;
 
-                loop {
-                    // Find reference to typeinfo
-                    let result = find_pattern_simd(
-                        &binary_data[search_offset as usize..end as usize],
-                        &type_info_ptr_pattern,
-                        &vec![],
-                    );
+                            if reference >= 0x8 {
+                                let offset_to_this = read_int64(binary_data, reference - 0x8);
+                                if offset_to_this == 0 {
+                                    return Ok(self.file_offset_to_rva(
+                                        binary_name,
+                                        reference + 0x8,
+                                    )?);
+                                }
+                            }
 
-                    if result.is_err() || result.as_ref().unwrap() == &0 {
-                        break;
-                    }
-
-                    let reference = result.unwrap() + search_offset;
-
-                    // Check if offset to this is 0 (at -0x8 from the reference)
-                    if reference >= 0x8 {
-                        let offset_to_this = read_int64(binary_data, reference - 0x8);
-                        if offset_to_this == 0 {
-                            // Found vtable at +0x8
-                            return Ok(self.file_offset_to_rva(binary_name, reference + 0x8)?);
+                            search_offset = reference + 8;
+                            if search_offset >= end {
+                                break;
+                            }
                         }
                     }
-
-                    // Continue searching after this match
-                    search_offset = reference + 8;
-                    if search_offset >= end {
-                        break;
-                    }
                 }
+
+                bail!("Vtable not found.")
+            })();
+
+            match attempt {
+                Ok(r) => return Ok(r),
+                Err(e) => last_err = Some(e),
             }
         }
 
-        Err(anyhow::anyhow!("Vtable not found."))
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Vtable not found.")))
     }
 
     fn is_valid_rva(&self, binary_name: &str, rva: u64) -> Result<bool> {

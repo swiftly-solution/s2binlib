@@ -19,7 +19,7 @@
 
 use anyhow::{Result, bail};
 use hashbrown::HashMap;
-use iced_x86::{Code, Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
+use iced_x86::{Code, Decoder, DecoderOptions, Instruction, OpKind, Register};
 use object::{Object, ObjectSection, ObjectSymbol, read::pe::ImageOptionalHeader};
 use std::{cell::Cell, fs, path::PathBuf};
 
@@ -550,7 +550,7 @@ impl<'a> S2BinLib<'a> {
         let mut last_err: Option<anyhow::Error> = None;
 
         for type_info_name in candidates {
-            let attempt = (|| {
+            let attempt: std::result::Result<u64, anyhow::Error> = (|| {
                 let type_info_name_str = self.read_string(binary_name, type_info_name)?;
                 if type_info_name_str != vtable_name {
                     bail!("Vtable not found.");
@@ -1309,64 +1309,131 @@ impl<'a> S2BinLib<'a> {
         self.is_nullsub_rva(binary_name, func_rva)
     }
 
+    fn build_ida_signature(signature: &[(u8, bool)]) -> String {
+        let mut out = String::new();
+        for (i, (byte, wildcard)) in signature.iter().enumerate() {
+            if *wildcard {
+                out.push('?');
+            } else {
+                out.push_str(&format!("{:02X}", byte));
+            }
+            if i + 1 != signature.len() {
+                out.push(' ');
+            }
+        }
+        out
+    }
+
+    fn trim_signature(signature: &mut Vec<(u8, bool)>) {
+        while signature.last().map_or(false, |(_, w)| *w) {
+            signature.pop();
+        }
+    }
+
+    fn is_signature_unique(&self, binary_name: &str, signature: &[(u8, bool)]) -> Result<bool> {
+        let count = Cell::new(0usize);
+        let sig_str = Self::build_ida_signature(signature);
+        let res = self.pattern_scan_all_rva(binary_name, &sig_str, |_, _| {
+            let next = count.get() + 1;
+            count.set(next);
+            next > 1
+        });
+        Ok(count.get() == 1)
+    }
+
     pub fn make_sig_rva(&self, binary_name: &str, func_rva: u64) -> Result<String> {
-        let data = self.read_by_rva(binary_name, func_rva, 1024)?;
-        let mut iced = Decoder::new(64, data, DecoderOptions::NONE);
+        const MAX_SIGNATURE_LENGTH: usize = 1000;
+        const WILDCARD_OPERANDS: bool = true;
+        const DONT_WILDCARD_ZERO_IMM: bool = true;
 
-        let mut sigs = String::new();
+        let binary_data = self.get_binary(binary_name)?;
+        let object = object::File::parse(binary_data)?;
+        let bitness = match object {
+            object::File::Pe64(_) | object::File::Elf64(_) => 64,
+            object::File::Pe32(_) | object::File::Elf32(_) => 32,
+            _ => bail!("Unsupported file format"),
+        };
 
-        let mut index = 0;
+        let start_offset = self.rva_to_file_offset(binary_name, func_rva)? as usize;
+        if start_offset >= binary_data.len() {
+            bail!("Invalid rva");
+        }
 
-        let mut warmup = 0;
-        let warmup_threshold = 3;
+        let mut decoder =
+            Decoder::with_ip(bitness, &binary_data[start_offset..], func_rva, DecoderOptions::NONE);
+        let mut instruction = Instruction::default();
 
-        while iced.can_decode() {
-            let inst = iced.decode();
-            if inst.mnemonic() == Mnemonic::Ret || inst.mnemonic() == Mnemonic::Int3 {
-                bail!("Leaved function scope");
+        let mut signature: Vec<(u8, bool)> = Vec::new();
+        let mut consumed = start_offset;
+        let mut total_len = 0usize;
+
+        while decoder.can_decode() {
+            decoder.decode_out(&mut instruction);
+            if instruction.is_invalid() {
+                if signature.is_empty() {
+                    bail!("Failed to decode instruction");
+                }
+                break;
             }
 
-            let inst_len = inst.len();
-            let opcode_len = inst.op_code().op_code_len() as usize;
-            let operand_len = inst_len - opcode_len;
-
-            let opcode = &data[index..index + opcode_len];
-            for byte in opcode {
-                sigs.push_str(&format!("{:02X} ", byte));
+            let inst_len = instruction.len() as usize;
+            if inst_len == 0 || consumed + inst_len > binary_data.len() {
+                bail!("Instruction out of range");
             }
 
-            index += opcode_len;
-
-            for _ in 0..operand_len {
-                sigs.push_str("? ");
-                index += 1;
+            total_len += inst_len;
+            if total_len > MAX_SIGNATURE_LENGTH {
+                bail!("Signature exceeded maximum length");
             }
 
-            let success = Cell::new(false);
+            let const_offsets = decoder.get_constant_offsets(&instruction);
+            let disp_off = const_offsets.displacement_offset() as usize;
+            let disp_size = const_offsets.displacement_size() as usize;
+            let imm1_off = const_offsets.immediate_offset() as usize;
+            let imm1_size = const_offsets.immediate_size() as usize;
+            let imm2_off = const_offsets.immediate_offset2() as usize;
+            let imm2_size = const_offsets.immediate_size2() as usize;
 
-            if warmup < warmup_threshold {
-                warmup += 1;
-                continue;
-            }
+            let mut wildcard_mask = vec![false; inst_len];
 
-            let _ = self.pattern_scan_all_rva(
-                binary_name,
-                &sigs[0..sigs.len() - 1],
-                |index, address| {
-                    if index == 0 && address == func_rva {
-                        success.set(true);
+            if WILDCARD_OPERANDS {
+                if disp_size > 0 && disp_off + disp_size <= inst_len {
+                    for i in disp_off..disp_off + disp_size {
+                        wildcard_mask[i] = true;
                     }
-                    if address != func_rva {
-                        success.set(false);
-                        return true;
-                    }
-                    false
-                },
-            );
+                }
 
-            if success.get() {
-                return Ok(sigs);
+                let imm_ranges = [
+                    (imm1_off, imm1_size),
+                    (imm2_off, imm2_size),
+                ];
+
+                for (off, size) in imm_ranges {
+                    if size == 0 || off + size > inst_len {
+                        continue;
+                    }
+                    let bytes = &binary_data[consumed + off..consumed + off + size];
+                    let is_zero = bytes.iter().all(|b| *b == 0);
+                    let should_wildcard = !(DONT_WILDCARD_ZERO_IMM && is_zero);
+                    if should_wildcard {
+                        for i in off..off + size {
+                            wildcard_mask[i] = true;
+                        }
+                    }
+                }
             }
+
+            for i in 0..inst_len {
+                let byte = binary_data[consumed + i];
+                signature.push((byte, wildcard_mask[i]));
+            }
+
+            if self.is_signature_unique(binary_name, &signature)? {
+                Self::trim_signature(&mut signature);
+                return Ok(Self::build_ida_signature(&signature));
+            }
+
+            consumed += inst_len;
         }
 
         bail!("Signature not found");

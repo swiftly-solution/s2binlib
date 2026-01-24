@@ -16,17 +16,17 @@
  *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
  ***********************************************************************************/
 
-use crate::compat::s2binlib002::{PatternScanCallback, S2BinLib002};
+use crate::compat::s2binlib003::{PatternScanCallback, S2BinLib003};
 use std::ffi::{c_char, c_void};
 use std::sync::Mutex;
 
-// Safety: S2BinLib002 contains a raw pointer to a vtable, but the vtable is static
+// Safety: S2BinLib003 contains a raw pointer to a vtable, but the vtable is static
 // and immutable. The vtable functions are designed to be called from any thread.
 // The internal S2BinLib state is not shared across threads (each instance is independent).
-unsafe impl Send for S2BinLib002 {}
+unsafe impl Send for S2BinLib003 {}
 
-/// Thread-safe global singleton instance of S2BinLib002
-static GLOBAL_INSTANCE: Mutex<Option<Box<S2BinLib002>>> = Mutex::new(None);
+/// Thread-safe global singleton instance of S2BinLib003
+static GLOBAL_INSTANCE: Mutex<Option<Box<S2BinLib003>>> = Mutex::new(None);
 
 /// Macro to get the global instance with error handling
 macro_rules! with_global_instance {
@@ -63,7 +63,7 @@ macro_rules! wrap_method_mut_no_params {
     ($func_name:ident, $method_name:ident) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $func_name() -> i32 {
-            with_global_instance!(|instance: &mut S2BinLib002| unsafe {
+            with_global_instance!(|instance: &mut S2BinLib003| unsafe {
                 let vtable = (*instance.vtable).$method_name;
                 vtable(instance)
             })
@@ -76,7 +76,7 @@ macro_rules! wrap_method_mut {
     ($func_name:ident, $method_name:ident, $($param:ident: $param_type:ty),*) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $func_name($($param: $param_type),*) -> i32 {
-            with_global_instance!(|instance: &mut S2BinLib002| unsafe {
+            with_global_instance!(|instance: &mut S2BinLib003| unsafe {
                 let vtable = (*instance.vtable).$method_name;
                 vtable(instance, $($param),*)
             })
@@ -89,7 +89,7 @@ macro_rules! wrap_method_const {
     ($func_name:ident, $method_name:ident, $($param:ident: $param_type:ty),*) => {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $func_name($($param: $param_type),*) -> i32 {
-            with_global_instance_const!(|instance: &S2BinLib002| unsafe {
+            with_global_instance_const!(|instance: &S2BinLib003| unsafe {
                 let vtable = (*instance.vtable).$method_name;
                 vtable(instance, $($param),*)
             })
@@ -101,7 +101,7 @@ macro_rules! wrap_method_const {
 // Lifecycle Functions
 // ============================================================================
 
-/// Initialize the global S2BinLib002 instance with auto-detected OS
+/// Initialize the global S2BinLib003 instance with auto-detected OS
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn s2binlib_initialize(
     game_path: *const c_char,
@@ -113,7 +113,7 @@ pub unsafe extern "C" fn s2binlib_initialize(
             Err(_) => return -99,
         };
 
-        let mut instance = Box::new(S2BinLib002::new());
+        let mut instance = Box::new(S2BinLib003::new());
         let vtable = (*instance.vtable).initialize;
         let result = vtable(instance.as_mut(), game_path, game_type);
 
@@ -125,7 +125,7 @@ pub unsafe extern "C" fn s2binlib_initialize(
     }
 }
 
-/// Initialize the global S2BinLib002 instance with explicit OS
+/// Initialize the global S2BinLib003 instance with explicit OS
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn s2binlib_initialize_with_os(
     game_path: *const c_char,
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn s2binlib_initialize_with_os(
             Err(_) => return -99,
         };
 
-        let mut instance = Box::new(S2BinLib002::new());
+        let mut instance = Box::new(S2BinLib003::new());
         let vtable = (*instance.vtable).initialize_with_os;
         let result = vtable(instance.as_mut(), game_path, game_type, os);
 
@@ -150,7 +150,7 @@ pub unsafe extern "C" fn s2binlib_initialize_with_os(
     }
 }
 
-/// Destroy the global S2BinLib002 instance
+/// Destroy the global S2BinLib003 instance
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn s2binlib_destroy() -> i32 {
     unsafe {
@@ -684,4 +684,13 @@ wrap_method_const!(
     find_networkvar_vtable_statechanged,
     vtable_mem_address: u64,
     result: *mut u64
+);
+
+wrap_method_mut!(
+    s2binlib_make_sig_rva,
+    make_sig_rva,
+    binary_name: *const c_char,
+    func_rva: u64,
+    result_out: *mut c_char,
+    result_out_size: usize
 );

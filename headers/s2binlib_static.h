@@ -1,7 +1,7 @@
 /************************************************************************************
  *  S2BinLib - A static library that helps resolving memory from binary file
  *  and map to absolute memory address, targeting source 2 game engine.
- *  Copyright (C) 2025  samyyc
+ *  Copyright (C) 2025-2026  samyyc
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by

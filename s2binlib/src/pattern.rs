@@ -70,6 +70,10 @@ fn check_match(data: &[u8], pattern: &[u8], mask: &[u8]) -> bool {
 }
 
 fn find_scalar(binary: &[u8], pattern: &[u8], mask: &[u8]) -> Result<u64> {
+    if pattern.is_empty() || binary.len() < pattern.len() {
+        return Err(anyhow::anyhow!("Pattern not found"));
+    }
+
     let end = binary.len() - pattern.len();
     for i in 0..=end {
         if check_match(&binary[i..], pattern, mask) {

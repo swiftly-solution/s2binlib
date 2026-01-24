@@ -52,67 +52,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_find_vtable() -> Result<()> {
+        let mut s2binlib = S2BinLib::new("F:/cs2server/cs2/game", "csgo", "linux");
+        s2binlib.load_binary("server");
+        // s2binlib.load_binary("engine2");
+
+        let server_vtables = vec![
+            "CBaseEntity",
+            "CPlayer_MovementServices",
+            "CSource2Server",
+            "CGameEventManager",
+            "CGameRulesGameSystem",
+            "CSource2GameClients"
+        ];
+
+        let engine2_vtables = vec![
+            "CLoopModeLevelLoad",
+            "CServerSideClient",
+            "CNetworkServerService",
+            "CGameEventSystem"
+        ];
+
+        for vtable in server_vtables {
+            let vtable = s2binlib.find_vtable_rva("server", vtable)?;
+            println!("{:X}", vtable);
+        }
+
+        // for vtable in engine2_vtables {
+        //     let vtable = s2binlib.find_vtable_rva("engine2", vtable)?;
+        //     println!("{:X}", vtable);
+        // }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_s2binlib() -> Result<()> {
         // fs::write("funcs.txt", serde_json::to_string_pretty(&funcs)?)?;
 
         let start = Instant::now();
 
-        let mut s2binlib = S2BinLib::new("F:/cs2server/game", "csgo", "windows");
+        let mut s2binlib = S2BinLib::new("F:/cs2server/cs2/game", "csgo", "windows");
 
         s2binlib.load_binary("server");
-
-        s2binlib.dump_strings("server")?;
-
-        println!(
-            "{:?}",
-            s2binlib
-                .strings_cache
-                .get("server")
-                .unwrap()
-                .get("nullptr Ent in GiveNamedItem: %s!")
-                .unwrap()
-        );
-
-        // println!("lib: {:?}", "");
-        // let lib = unsafe { Library::new("F:/cs2server/game/bin/win64/tier0.dll")? };
-
-        // println!("lib: {:?}", lib);
-
-        // let module_info = get_module_info("tier0.dll")?;
-
-        // let view = unsafe {
-        //     MemoryView::new(
-        //         module_info.base_address as *const u8,
-        //         module_info.size,
-        //         module_info.base_address as u64,
-        //     )
-        // };
-
-        // let view2 = s2binlib.get_file_binary_view("server")?;
-
-        // let mut parser = MsvcParser::new(&view);
-        // let vtables = parser.parse()?;
-
-        // println!("{:?}", vtables);
-
-        // let c = view.read::<u64>(module_info.base_address as u64).unwrap();
-        // let locator = parser.parse_locator(c).unwrap();
-        // let vtable = parser.build_vtable_info(0x1811330D0, &locator).unwrap();
-
-        // println!("vtables: {:?}", vtables);
-
-        // let xref = s2binlib.pattern_scan_va("server", "4C 8D 35 ? ? ? ? 77")?;
-
-        // let duration = start.elapsed();
-        // println!("Time taken: {:?}", duration);
-        // println!("xref {:X}", xref);
-        // println!("follow xref {:X}", s2binlib.follow_xref_va_to_va("server", xref)?);
-
-        // let str = s2binlib.find_string_va("server", "Think_Update")?;
-        // println!("str: {:X}", str);
-        // s2binlib.dump_xrefs("server")?;
-        // // println!("{:X}", s2binlib.find_export_va("tier0", "Plat_GetOSType")?);
-        // println!("{:X}", s2binlib.find_vfunc_by_vtbname_va("server", "CCSPlayerController", 11)?);
 
         Ok(())
     }

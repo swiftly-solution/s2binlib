@@ -30,7 +30,6 @@ This library mainly read data from original binary file instead of from memory, 
 
 - `s2binlib`: core Rust library crate exposing safe APIs.
 - `s2binlib_binding`: C ABI wrapper crate that links to `s2binlib` and produces the `s2binlib` DLL/LIB artifacts.
-- `s2binlib_tracker`: A long-running tracker based on s2binlib that polls the CS2 public branch manifests via steamcmd and dumps each new version for both Windows and Linux, keeping the latest 10 dump results and recording each version's release date.
 
 ## Compiling
 

@@ -549,7 +549,7 @@ impl<'a, V: BinaryView<'a>> ItaniumParser<'a, V> {
             type_name: name,
             vtable_address: vtable_va,
             methods,
-            bases,
+            bases: Self::flatten_bases(&bases),
             model: VTableModel::Itanium { offset_to_top },
         })
     }
@@ -620,6 +620,26 @@ impl<'a, V: BinaryView<'a>> ItaniumParser<'a, V> {
             }
         }
         self.parse_vmi_typeinfo(section_index, offset)
+    }
+
+    /// Itanium RTTI only records direct base classes. Flatten the nested
+    /// hierarchy in pre-order (direct base first, then its ancestors) so that
+    /// `VTableInfo::bases` contains the full transitive base list, matching
+    /// what the MSVC parser produces from the class hierarchy descriptor.
+    /// The nested subtrees are stripped from the flattened entries to avoid
+    /// duplicating the hierarchy at every level.
+    fn flatten_bases(bases: &[BaseClassInfo]) -> Vec<BaseClassInfo> {
+        let mut flattened = Vec::new();
+        for base in bases {
+            let mut flat = base.clone();
+            let nested = match &mut flat.details {
+                BaseClassModel::Itanium { bases, .. } => std::mem::take(bases),
+                _ => Vec::new(),
+            };
+            flattened.push(flat);
+            flattened.extend(Self::flatten_bases(&nested));
+        }
+        flattened
     }
 
     fn parse_vmi_typeinfo(&mut self, section_index: usize, offset: u64) -> Vec<BaseClassInfo> {

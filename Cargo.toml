@@ -2,7 +2,7 @@
 members = [
     "s2binlib",
     "s2binlib_binding",
-    "s2binlib_dumper"
+    "s2binlib_tracker"
 , "s2binlib_test"]
 
 resolver = "2"

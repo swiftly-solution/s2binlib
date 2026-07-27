@@ -20,7 +20,9 @@
 use anyhow::{Result, bail};
 use hashbrown::HashMap;
 use iced_x86::{Code, Decoder, DecoderOptions, Instruction, OpKind, Register};
-use object::{Object, ObjectSection, ObjectSymbol, read::pe::ImageOptionalHeader};
+use object::{
+    Object, ObjectSection, ObjectSymbol, SectionKind, read::pe::ImageOptionalHeader,
+};
 use std::{cell::Cell, fs, path::PathBuf};
 
 use crate::{
@@ -1045,18 +1047,26 @@ impl<'a> S2BinLib<'a> {
     }
 
     pub fn dump_strings(&mut self, binary_name: &str) -> Result<()> {
-        const MIN_LENGTH: u64 = 4;
+        const MIN_LENGTH: u64 = 1;
         let binary_data = self.get_binary(binary_name)?;
+        let object = object::File::parse(binary_data)?;
         let mut strings_map: HashMap<String, u64> = HashMap::new();
 
         let mut section_ranges = vec![];
-        if self.get_os() == "windows" {
-            section_ranges.push(self.get_section_range(binary_name, ".data")?);
-            section_ranges.push(self.get_section_range(binary_name, ".rdata")?);
-        } else if self.get_os() == "linux" {
-            section_ranges.push(self.get_section_range(binary_name, ".rodata")?);
-            section_ranges.push(self.get_section_range(binary_name, ".data")?);
-            section_ranges.push(self.get_section_range(binary_name, ".data.rel.ro")?);
+        for section in object.sections() {
+            match section.kind() {
+                // Skip code and uninitialized data, scan everything else
+                SectionKind::Text
+                | SectionKind::UninitializedData
+                | SectionKind::UninitializedTls => continue,
+                _ => {}
+            }
+            if let Some((start, size)) = section.file_range() {
+                let end = (start + size).min(binary_data.len() as u64);
+                if start < end {
+                    section_ranges.push((start, end));
+                }
+            }
         }
 
         for section_range in section_ranges {

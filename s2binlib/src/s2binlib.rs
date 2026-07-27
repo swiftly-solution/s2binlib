@@ -1047,7 +1047,7 @@ impl<'a> S2BinLib<'a> {
     }
 
     pub fn dump_strings(&mut self, binary_name: &str) -> Result<()> {
-        const MIN_LENGTH: u64 = 1;
+        const MIN_LENGTH: u64 = 4;
         let binary_data = self.get_binary(binary_name)?;
         let object = object::File::parse(binary_data)?;
         let mut strings_map: HashMap<String, u64> = HashMap::new();

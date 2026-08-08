@@ -17,7 +17,7 @@
  ***********************************************************************************/
 
 use crate::compat::s2binlib003::{PatternScanCallback, S2BinLib003};
-use std::ffi::{c_char, c_void};
+use std::ffi::{CStr, c_char, c_void};
 use std::sync::Mutex;
 
 // Safety: S2BinLib003 contains a raw pointer to a vtable, but the vtable is static
@@ -369,6 +369,34 @@ wrap_method_mut!(
     string: *const c_char,
     result: *mut *mut c_void
 );
+
+/// Dump all printable ASCII strings and their RVAs to a JSON file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn s2binlib_dump_strings_to_json(
+    binary_name: *const c_char,
+    output_path: *const c_char,
+) -> i32 {
+    if binary_name.is_null() || output_path.is_null() {
+        return -2;
+    }
+
+    let binary_name = unsafe {
+        match CStr::from_ptr(binary_name).to_str() {
+            Ok(value) => value,
+            Err(_) => return -2,
+        }
+    };
+    let output_path = unsafe {
+        match CStr::from_ptr(output_path).to_str() {
+            Ok(value) => value,
+            Err(_) => return -2,
+        }
+    };
+
+    with_global_instance!(|instance: &mut S2BinLib003| {
+        instance.dump_strings_to_json(binary_name, output_path)
+    })
+}
 
 // ============================================================================
 // Module Base Address Functions

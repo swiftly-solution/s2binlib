@@ -108,6 +108,25 @@ impl S2BinLib003 {
             s2binlib: None,
         }
     }
+
+    pub(crate) fn dump_strings_to_json(&mut self, binary_name: &str, output_path: &str) -> i32 {
+        let Some(s2binlib) = self.s2binlib.as_mut() else {
+            c_debug!("Error -1: S2BinLib003 is not initialized");
+            return -1;
+        };
+
+        if !s2binlib.is_binary_loaded(binary_name) {
+            s2binlib.load_binary(binary_name);
+        }
+
+        match s2binlib.dump_strings_to_json(binary_name, output_path) {
+            Ok(()) => 0,
+            Err(error) => {
+                c_debug!("Error -4: Failed to dump strings to JSON: {}", error);
+                -4
+            }
+        }
+    }
 }
 
 #[repr(C)]

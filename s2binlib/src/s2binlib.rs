@@ -20,10 +20,14 @@
 use anyhow::{Result, bail};
 use hashbrown::HashMap;
 use iced_x86::{Code, Decoder, DecoderOptions, Instruction, OpKind, Register};
-use object::{
-    Object, ObjectSection, ObjectSymbol, SectionKind, read::pe::ImageOptionalHeader,
+use object::{Object, ObjectSection, ObjectSymbol, SectionKind, read::pe::ImageOptionalHeader};
+use std::{
+    cell::Cell,
+    collections::BTreeMap,
+    fs::{self, File},
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
 };
-use std::{cell::Cell, fs, path::PathBuf};
 
 use crate::{
     VTableInfo, find_pattern_simd, is_executable,
@@ -58,7 +62,7 @@ pub struct S2BinLib<'a> {
     pub(crate) custom_binary_paths_linux: HashMap<String, String>,
     pub(crate) vtables: HashMap<String, Vec<VTableInfo>>,
     pub(crate) name_to_vtables: HashMap<String, &'a VTableInfo>,
-    /// Cached ASCII strings: binary_name -> (string_rva -> string)
+    /// Cached ASCII strings: binary_name -> (string -> string_rva)
     pub(crate) strings_cache: HashMap<String, HashMap<String, u64>>,
     pub(crate) calls_targets_cache: HashMap<String, Vec<u64>>,
 }
@@ -77,6 +81,22 @@ fn read_int64(data: &[u8], offset: u64) -> i64 {
         rvalue |= (data[offset as usize + i as usize] as i64) << (i * 8);
     }
     rvalue
+}
+
+fn write_strings_to_json<P: AsRef<Path>>(
+    strings: &HashMap<String, u64>,
+    output_path: P,
+) -> Result<()> {
+    let ordered_strings: BTreeMap<&str, u64> = strings
+        .iter()
+        .map(|(string, rva)| (string.as_str(), *rva))
+        .collect();
+
+    let mut output = BufWriter::new(File::create(output_path)?);
+    serde_json::to_writer_pretty(&mut output, &ordered_strings)?;
+    output.flush()?;
+
+    Ok(())
 }
 
 impl<'a> S2BinLib<'a> {
@@ -1106,6 +1126,24 @@ impl<'a> S2BinLib<'a> {
         Ok(())
     }
 
+    /// Dump all printable ASCII strings and their RVAs to a JSON file.
+    ///
+    /// The binary is scanned before every write so the output always reflects
+    /// the currently loaded binary. JSON object keys are sorted to make dumps
+    /// deterministic across runs.
+    pub fn dump_strings_to_json<P: AsRef<Path>>(
+        &mut self,
+        binary_name: &str,
+        output_path: P,
+    ) -> Result<()> {
+        self.dump_strings(binary_name)?;
+
+        let strings = self
+            .get_strings(binary_name)
+            .ok_or_else(|| anyhow::anyhow!("Strings were not cached."))?;
+        write_strings_to_json(strings, output_path)
+    }
+
     pub fn get_strings(&self, binary_name: &str) -> Option<&HashMap<String, u64>> {
         self.strings_cache.get(binary_name)
     }
@@ -1522,12 +1560,18 @@ impl<'a> S2BinLib<'a> {
     }
 
     pub fn find_func_start_rva(&self, binary_name: &str, include_rva: u64) -> Result<u64> {
-        Ok(std::cmp::max(
-            self.find_xref_func_start_rva(binary_name, include_rva)?,
-            self.find_vfunc_start_rva(binary_name, include_rva)
-                .unwrap()
-                .2,
-        ))
+        let xref_start = self.find_xref_func_start_rva(binary_name, include_rva)?;
+        let vfunc_start = self
+            .find_vfunc_start_rva(binary_name, include_rva)
+            .map(|(_, _, rva)| rva)
+            .unwrap_or_default();
+        let func_start = std::cmp::max(xref_start, vfunc_start);
+
+        if func_start == 0 {
+            bail!("No function found.");
+        }
+
+        Ok(func_start)
     }
 
     pub fn find_func_start(&self, binary_name: &str, include_rva: u64) -> Result<u64> {
@@ -1610,5 +1654,46 @@ impl<'a> S2BinLib<'a> {
             binary_name,
             self.get_string_reference_xref(binary_name, string)?,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strings_json_is_sorted_and_contains_rvas() {
+        let mut strings = HashMap::new();
+        strings.insert("zeta".to_string(), 0x200);
+        strings.insert("alpha".to_string(), 0x100);
+        let output_path =
+            std::env::temp_dir().join(format!("s2binlib-strings-{}.json", std::process::id()));
+
+        write_strings_to_json(&strings, &output_path).unwrap();
+
+        let output = fs::read_to_string(&output_path).unwrap();
+        let parsed: BTreeMap<String, u64> = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed.get("alpha"), Some(&0x100));
+        assert_eq!(parsed.get("zeta"), Some(&0x200));
+        assert!(output.find("alpha").unwrap() < output.find("zeta").unwrap());
+
+        fs::remove_file(output_path).unwrap();
+    }
+
+    #[test]
+    fn find_func_start_rva_falls_back_to_xref_without_vtable_match() {
+        let mut library = S2BinLib::new(".", "csgo", "windows");
+        library
+            .calls_targets_cache
+            .insert("server".to_string(), vec![0x100]);
+
+        assert_eq!(library.find_func_start_rva("server", 0x200).unwrap(), 0x100);
+    }
+
+    #[test]
+    fn find_func_start_rva_returns_error_without_candidates() {
+        let library = S2BinLib::new(".", "csgo", "windows");
+
+        assert!(library.find_func_start_rva("server", 0x200).is_err());
     }
 }

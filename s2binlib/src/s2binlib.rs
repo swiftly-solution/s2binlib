@@ -1487,6 +1487,44 @@ impl<'a> S2BinLib<'a> {
         bail!("Signature not found");
     }
 
+    fn find_func_start_via_padding_rva(&self, binary_name: &str, include_rva: u64) -> Option<u64> {
+        const MIN_PADDING: usize = 2;
+
+        let binary_data = self.get_binary(binary_name).ok()?;
+        let object = object::File::parse(binary_data).ok()?;
+
+        let mut bounds = None;
+        for section in object.sections() {
+            let section_rva = section.address();
+            let section_size = section.size();
+            if include_rva >= section_rva && include_rva < section_rva + section_size {
+                let (file_start, _file_size) = section.file_range()?;
+                bounds = Some((section_rva, file_start));
+                break;
+            }
+        }
+        let (section_rva, file_start) = bounds?;
+
+        let include_off = self.rva_to_file_offset(binary_name, include_rva).ok()? as usize;
+        let file_start = file_start as usize;
+
+        let mut i = include_off;
+        let mut run = 0usize;
+        while i > file_start {
+            i -= 1;
+            if binary_data[i] == 0xCC {
+                run += 1;
+                if run >= MIN_PADDING {
+                    let start_off = i + run;
+                    return Some(section_rva + (start_off as u64 - file_start as u64));
+                }
+            } else {
+                run = 0;
+            }
+        }
+        None
+    }
+
     pub fn find_xref_func_start_rva(&self, binary_name: &str, include_rva: u64) -> Result<u64> {
         let mut nearest_rva = 0u64;
         if let Some(cache) = self.calls_targets_cache.get(binary_name) {
@@ -1565,7 +1603,11 @@ impl<'a> S2BinLib<'a> {
             .find_vfunc_start_rva(binary_name, include_rva)
             .map(|(_, _, rva)| rva)
             .unwrap_or_default();
-        let func_start = std::cmp::max(xref_start, vfunc_start);
+        let mut func_start = std::cmp::max(xref_start, vfunc_start);
+
+        if let Some(padding_start) = self.find_func_start_via_padding_rva(binary_name, include_rva) {
+            func_start = padding_start;
+        }
 
         if func_start == 0 {
             bail!("No function found.");

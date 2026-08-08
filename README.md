@@ -93,6 +93,9 @@ int main() {
   void* vtable_addr;
   s2binlib_find_vtable("server", "CBaseEntity", &vtable_addr);
 
+  // Dump every printable ASCII string and its RVA to a JSON file
+  s2binlib_dump_strings_to_json("server", "server_strings.json");
+
   // Free after use, this will only release the file bytes in memory
   // Dumped xref and other information will still be cached
   s2binlib_unload_all_binaries();

@@ -254,6 +254,12 @@ int s2binlib_find_string_rva(const char* binary_name, const char* string, void**
 /// @return 0 on success, negative error code on failure
 int s2binlib_find_string(const char* binary_name, const char* string, void** result);
 
+/// Dump all printable ASCII strings and their relative virtual addresses to a JSON file
+/// @param binary_name Name of the binary to scan
+/// @param output_path UTF-8 path of the JSON file to create or overwrite
+/// @return 0 on success, negative error code on failure
+int s2binlib_dump_strings_to_json(const char* binary_name, const char* output_path);
+
 // ============================================================================
 // Module Base Address Functions
 // ============================================================================

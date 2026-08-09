@@ -1525,6 +1525,111 @@ impl<'a> S2BinLib<'a> {
         None
     }
 
+    fn find_func_end_via_padding_rva(&self, binary_name: &str, start_rva: u64) -> Option<u64> {
+        const MIN_PADDING: usize = 2;
+        const MAX_SCAN: usize = 0x8000;
+
+        let binary_data = self.get_binary(binary_name).ok()?;
+        let object = object::File::parse(binary_data).ok()?;
+
+        let mut bounds = None;
+        for section in object.sections() {
+            let section_rva = section.address();
+            let section_size = section.size();
+            if start_rva >= section_rva && start_rva < section_rva + section_size {
+                let (file_start, file_size) = section.file_range()?;
+                bounds = Some((section_rva, file_start, file_start + file_size));
+                break;
+            }
+        }
+        let (section_rva, file_start, file_end) = bounds?;
+
+        let start_off = self.rva_to_file_offset(binary_name, start_rva).ok()? as usize;
+        let file_end = file_end as usize;
+        let scan_end = file_end.min(start_off + MAX_SCAN);
+
+        let mut i = start_off;
+        let mut run = 0usize;
+        while i < scan_end {
+            if binary_data[i] == 0xCC {
+                run += 1;
+                if run >= MIN_PADDING {
+                    let end_off = i + 1 - run;
+                    return Some(section_rva + (end_off as u64 - file_start as u64));
+                }
+            } else {
+                run = 0;
+            }
+            i += 1;
+        }
+
+        Some(section_rva + (scan_end as u64 - file_start as u64))
+    }
+
+    fn find_call_target_with_xref_arg_rva(
+        &self,
+        binary_name: &str,
+        func_start_rva: u64,
+        func_end_rva: u64,
+        target_rva: u64,
+    ) -> Option<u64> {
+        let binary_data = self.get_binary(binary_name).ok()?;
+        let object = object::File::parse(binary_data).ok()?;
+        let bitness = match object {
+            object::File::Pe64(_) | object::File::Elf64(_) => 64,
+            object::File::Pe32(_) | object::File::Elf32(_) => 32,
+            _ => return None,
+        };
+
+        if func_end_rva <= func_start_rva {
+            return None;
+        }
+
+        let start_off = self.rva_to_file_offset(binary_name, func_start_rva).ok()? as usize;
+        let end_off =
+            (start_off + (func_end_rva - func_start_rva) as usize).min(binary_data.len());
+        if start_off >= end_off {
+            return None;
+        }
+
+        let mut decoder = Decoder::with_ip(
+            bitness,
+            &binary_data[start_off..end_off],
+            func_start_rva,
+            DecoderOptions::NONE,
+        );
+        let mut instruction = Instruction::default();
+        let mut seen_target_load = false;
+
+        while decoder.can_decode() {
+            decoder.decode_out(&mut instruction);
+            if instruction.is_invalid() {
+                break;
+            }
+
+            if !seen_target_load {
+                for i in 0..instruction.op_count() {
+                    if instruction.op_kind(i) == OpKind::Memory
+                        && instruction.is_ip_rel_memory_operand()
+                        && instruction.ip_rel_memory_address() == target_rva
+                    {
+                        seen_target_load = true;
+                        break;
+                    }
+                }
+            } else if (instruction.is_call_near() || instruction.is_call_far())
+                && matches!(
+                    instruction.op0_kind(),
+                    OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+                )
+            {
+                return Some(instruction.near_branch_target());
+            }
+        }
+
+        None
+    }
+
     pub fn find_xref_func_start_rva(&self, binary_name: &str, include_rva: u64) -> Result<u64> {
         let mut nearest_rva = 0u64;
         if let Some(cache) = self.calls_targets_cache.get(binary_name) {
@@ -1697,6 +1802,53 @@ impl<'a> S2BinLib<'a> {
             self.get_string_reference_xref(binary_name, string)?,
         )
     }
+
+    pub fn find_call_with_xref_arg_rva(
+        &self,
+        binary_name: &str,
+        func_start_rva: u64,
+        target_rva: u64,
+    ) -> Result<u64> {
+        let func_end_rva = self
+            .find_func_end_via_padding_rva(binary_name, func_start_rva)
+            .ok_or_else(|| anyhow::anyhow!("Could not determine function end."))?;
+
+        self.find_call_target_with_xref_arg_rva(binary_name, func_start_rva, func_end_rva, target_rva)
+            .ok_or_else(|| anyhow::anyhow!("No call with matching xref argument found."))
+    }
+
+    pub fn find_call_with_xref_arg(
+        &self,
+        binary_name: &str,
+        func_start: u64,
+        target: u64,
+    ) -> Result<u64> {
+        let func_start_rva = self.mem_address_to_rva(binary_name, func_start)?;
+        let target_rva = self.mem_address_to_rva(binary_name, target)?;
+        let result = self.find_call_with_xref_arg_rva(binary_name, func_start_rva, target_rva)?;
+        self.rva_to_mem_address(binary_name, result)
+    }
+
+    pub fn find_call_with_string_arg_rva(
+        &self,
+        binary_name: &str,
+        func_start_rva: u64,
+        string: &str,
+    ) -> Result<u64> {
+        let string_rva = self.find_string_rva(binary_name, string)?;
+        self.find_call_with_xref_arg_rva(binary_name, func_start_rva, string_rva)
+    }
+
+    pub fn find_call_with_string_arg(
+        &self,
+        binary_name: &str,
+        func_start: u64,
+        string: &str,
+    ) -> Result<u64> {
+        let func_start_rva = self.mem_address_to_rva(binary_name, func_start)?;
+        let result = self.find_call_with_string_arg_rva(binary_name, func_start_rva, string)?;
+        self.rva_to_mem_address(binary_name, result)
+    }
 }
 
 #[cfg(test)]
@@ -1737,5 +1889,35 @@ mod tests {
         let library = S2BinLib::new(".", "csgo", "windows");
 
         assert!(library.find_func_start_rva("server", 0x200).is_err());
+    }
+
+    #[test]
+    fn find_call_with_string_arg_resolves_schema_system_call_in_install_schema_bindings() {
+        let mut library = S2BinLib::new(
+            r"C:\Users\SkuZZi\Desktop\CS2\Tracker\s2dumper\schema_install\game",
+            "csgo",
+            "windows",
+        );
+        library.load_binary("server");
+        library.dump_xrefs("server").unwrap();
+
+        let export_rva = library
+            .find_export_rva("server", "InstallSchemaBindings")
+            .unwrap();
+
+        let call_target_rva = library
+            .find_call_with_string_arg_rva("server", export_rva, "SchemaSystem_001")
+            .unwrap();
+
+        println!("InstallSchemaBindings @ rva 0x{:x}", export_rva);
+        println!("call target @ rva 0x{:x}", call_target_rva);
+        println!(
+            "call target @ file offset 0x{:x}",
+            library.rva_to_file_offset("server", call_target_rva).unwrap()
+        );
+
+        assert_ne!(call_target_rva, 0);
+        let file_offset = library.rva_to_file_offset("server", call_target_rva).unwrap();
+        assert!(library.is_file_offset_executable("server", file_offset).unwrap());
     }
 }

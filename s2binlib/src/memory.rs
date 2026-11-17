@@ -193,11 +193,68 @@ pub fn get_module_base_from_pointer(ptr: u64) -> u64 {
     module_from_pointer(ptr).map(|(_, base)| base).unwrap_or(0)
 }
 
+/// Adds write access to each page holding `ptr..ptr + size`, for patching data such as a vtable
+/// slot, and keeps whatever else the page allowed. Execute is never added: under SELinux, adding
+/// execute to a file mapping the loader has relocated (a vtable in `.data.rel.ro`) needs
+/// `execmod`, which the default policy can deny. Nor is it taken away, so code that shares a page
+/// with the patched data keeps running.
 #[allow(dead_code)]
 pub fn set_mem_access(ptr: u64, size: usize) -> Result<()> {
-    unsafe {
-        let addr = ptr as *const u8;
-        region::protect(addr, size, region::Protection::READ_WRITE_EXECUTE)
-            .map_err(|e| anyhow::anyhow!("Failed to change memory protection: {}", e))
+    let page = region::page::size();
+    let start = region::page::floor(ptr as *const u8) as usize;
+    let end = ptr as usize + size.max(1);
+
+    for page_start in (start..end).step_by(page) {
+        let addr = page_start as *const u8;
+        let current = region::query(addr)
+            .map_err(|e| anyhow::anyhow!("Failed to query memory protection: {}", e))?
+            .protection();
+
+        unsafe {
+            region::protect(addr, page, current | region::Protection::WRITE)
+                .map_err(|e| anyhow::anyhow!("Failed to change memory protection: {}", e))?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use region::Protection;
+
+    fn access_after(initial: Protection) -> Protection {
+        let memory = region::alloc(1, initial).unwrap();
+        let ptr = memory.as_ptr::<u8>() as u64;
+        set_mem_access(ptr + 8, 8).unwrap();
+        region::query(memory.as_ptr::<u8>()).unwrap().protection()
+    }
+
+    #[test]
+    fn adds_write_without_execute() {
+        assert_eq!(access_after(Protection::READ), Protection::READ_WRITE);
+    }
+
+    #[test]
+    fn keeps_execute_on_a_page_that_had_it() {
+        assert_eq!(
+            access_after(Protection::READ_EXECUTE),
+            Protection::READ_WRITE_EXECUTE
+        );
+    }
+
+    #[test]
+    fn covers_every_page_of_a_range_across_a_boundary() {
+        let page = region::page::size();
+        let memory = region::alloc(2 * page, Protection::READ).unwrap();
+        let base = memory.as_ptr::<u8>();
+        set_mem_access(base as u64 + page as u64 - 4, 8).unwrap();
+        for offset in [0, page] {
+            let protection = region::query(unsafe { base.add(offset) })
+                .unwrap()
+                .protection();
+            assert_eq!(protection, Protection::READ_WRITE);
+        }
     }
 }

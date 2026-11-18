@@ -19,31 +19,30 @@
 
 use anyhow::Result;
 use iced_x86::{Code, Encoder, Instruction, Register};
-use region::{Protection, protect_with_handle};
-use std::{alloc, ptr};
+use region::{Allocation, Protection};
+use std::ptr;
 
 pub struct JitTrampoline {
     ptr: *mut u8,
     size: usize,
-    _handle: region::ProtectGuard,
+    // Unmapped on drop.
+    _memory: Allocation,
 }
 
 impl JitTrampoline {
+    /// The stub lives in its own anonymous mapping rather than on the heap: SELinux denies making
+    /// heap memory executable (`execheap`, denied by default policy with `selinuxuser_execheap`
+    /// off), while an executable anonymous mapping is the same kind of memory safetyhook
+    /// allocates for every inline hook.
     pub fn new(target_address: u64) -> Result<Self> {
         let code = Self::generate(target_address)?;
-        let size = code.len().max(region::page::size());
-        let layout =
-            unsafe { alloc::Layout::from_size_align_unchecked(size, region::page::size()) };
-        let ptr = unsafe { alloc::alloc(layout) };
-        if ptr.is_null() {
-            anyhow::bail!("alloc failed");
-        }
+        let mut memory = region::alloc(code.len(), Protection::READ_WRITE_EXECUTE)?;
+        let ptr = memory.as_mut_ptr::<u8>();
         unsafe { ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len()) };
-        let handle = unsafe { protect_with_handle(ptr, size, Protection::READ_WRITE_EXECUTE)? };
         Ok(Self {
             ptr,
-            size,
-            _handle: handle,
+            size: memory.len(),
+            _memory: memory,
         })
     }
 
@@ -73,14 +72,6 @@ impl JitTrampoline {
     }
 }
 
-impl Drop for JitTrampoline {
-    fn drop(&mut self) {
-        unsafe {
-            let layout = alloc::Layout::from_size_align_unchecked(self.size, region::page::size());
-            alloc::dealloc(self.ptr, layout);
-        }
-    }
-}
 unsafe impl Send for JitTrampoline {}
 
 #[cfg(test)]
@@ -95,6 +86,16 @@ mod tests {
     }
     extern "C" fn f12345() -> i32 {
         12345
+    }
+
+    #[test]
+    fn t_drop_and_reuse() -> Result<()> {
+        for _ in 0..64 {
+            let t = JitTrampoline::new(f42 as u64)?;
+            let f: extern "C" fn() -> i32 = unsafe { t.as_fn_ptr() };
+            assert_eq!(f(), 42);
+        }
+        Ok(())
     }
 
     #[test]
